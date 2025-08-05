@@ -12,8 +12,7 @@ st.set_page_config(
     layout="wide"
 )
 
-BACKEND_URL = "https://bi-ai-agent.onrender.com"
-
+QUERY_ENDPOINT = "https://bi-ai-agent.onrender.com/openai/query"
 
 # --- STYLING ---
 def load_css():
@@ -312,7 +311,7 @@ def send_query_to_backend(query):
                 "database_config": database_config  # NEW addition
             }
             
-            response = requests.post(BACKEND_URL, json=payload, timeout=50)
+            response = requests.post(QUERY_ENDPOINT, json=payload, timeout=50)
             response.raise_for_status()
             response_data = response.json()
             
@@ -391,7 +390,7 @@ def handle_chart_type_selection(chart_type):
                 "database_config": database_config  # NEW addition
             }
             
-            response = requests.post(BACKEND_URL, json=payload, timeout=50)
+            response = requests.post(QUERY_ENDPOINT, json=payload, timeout=50)
             response.raise_for_status()
             response_data = response.json()
             
