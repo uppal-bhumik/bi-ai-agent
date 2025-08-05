@@ -12,7 +12,8 @@ st.set_page_config(
     layout="wide"
 )
 
-BACKEND_URL = "http://127.0.0.1:5050/openai/query"
+BACKEND_URL = "https://bi-ai-agent.onrender.com"
+
 
 # --- STYLING ---
 def load_css():
