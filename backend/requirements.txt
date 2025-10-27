@@ -4,3 +4,4 @@ numpy==2.3.2
 python-dotenv==1.1.1
 Requests==2.32.4
 SQLAlchemy==2.0.42
+gunicorn==21.2.0
