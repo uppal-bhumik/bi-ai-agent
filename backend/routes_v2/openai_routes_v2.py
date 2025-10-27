@@ -1,6 +1,6 @@
 from flask import Blueprint, request, jsonify, session
 import os
-import requests
+from openai import OpenAI
 import json
 import traceback
 import re
@@ -23,13 +23,9 @@ load_dotenv()
 
 openai_bp = Blueprint("openai_bp", __name__, url_prefix="/openai")
 
-URL = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "mistralai/mistral-7b-instruct:free"
-
-HEADERS = {
-    "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-    "Content-Type": "application/json"
-}
+# Initialize OpenAI client
+client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+MODEL = "gpt-4o-mini"
 
 # Configuration
 BUSINESS_KEYWORDS = [
@@ -196,18 +192,122 @@ def detect_revenue_columns(schema_info):
     
     return quantity_col, price_col
 
+def auto_detect_chart_columns(schema_info):
+    """
+    Intelligently detect the best columns for chart generation
+    Returns: (group_by_list, projections_dict)
+    """
+    if not schema_info or not schema_info.get('columns'):
+        return None, None
+    
+    columns = schema_info['columns']
+    
+    # Categorize columns by type
+    categorical_columns = []  # For grouping (VARCHAR, TEXT, ENUM, etc.)
+    numeric_columns = []      # For aggregation (INT, DECIMAL, FLOAT, etc.)
+    date_columns = []         # For time-based grouping
+    
+    for col in columns:
+        col_name = col['name']
+        col_type = str(col['type']).upper()
+        
+        # Skip ID columns and timestamps from grouping
+        if col_name.lower() in ['id', 'order_id', 'product_id', 'customer_id', 'user_id', 'created_at', 'updated_at', 'timestamp']:
+            continue
+        
+        # Detect categorical columns (good for grouping)
+        if any(t in col_type for t in ['VARCHAR', 'CHAR', 'TEXT', 'STRING', 'ENUM']):
+            categorical_columns.append(col_name)
+        
+        # Detect numeric columns (good for aggregation)
+        elif any(t in col_type for t in ['INT', 'INTEGER', 'DECIMAL', 'NUMERIC', 'FLOAT', 'DOUBLE', 'REAL', 'MONEY']):
+            numeric_columns.append(col_name)
+        
+        # Detect date columns
+        elif any(t in col_type for t in ['DATE', 'TIME', 'TIMESTAMP']):
+            date_columns.append(col_name)
+    
+    print(f"[AUTO_DETECT] Categorical: {categorical_columns}, Numeric: {numeric_columns}, Date: {date_columns}")
+    
+    # Priority 1: Find best grouping column
+    group_by_column = None
+    
+    # Look for common business dimension columns first
+    priority_group_patterns = [
+        'category', 'product', 'region', 'customer', 'status', 
+        'type', 'name', 'segment', 'department', 'brand'
+    ]
+    
+    for pattern in priority_group_patterns:
+        for col in categorical_columns:
+            if pattern in col.lower():
+                group_by_column = col
+                break
+        if group_by_column:
+            break
+    
+    # Fallback: Use first categorical column
+    if not group_by_column and categorical_columns:
+        group_by_column = categorical_columns[0]
+    
+    # Fallback: Use date column if no categorical
+    if not group_by_column and date_columns:
+        group_by_column = date_columns[0]
+    
+    if not group_by_column:
+        print("[AUTO_DETECT] ❌ No suitable grouping column found")
+        return None, None
+    
+    # Priority 2: Find best aggregation column
+    aggregation_column = None
+    aggregation_function = "SUM"
+    
+    # Look for common metric columns
+    priority_metric_patterns = [
+        'total', 'amount', 'revenue', 'sales', 'profit', 
+        'quantity', 'qty', 'price', 'cost', 'value'
+    ]
+    
+    for pattern in priority_metric_patterns:
+        for col in numeric_columns:
+            if pattern in col.lower():
+                aggregation_column = col
+                break
+        if aggregation_column:
+            break
+    
+    # Fallback: Use first numeric column
+    if not aggregation_column and numeric_columns:
+        aggregation_column = numeric_columns[0]
+    
+    # Ultimate fallback: COUNT the grouping column
+    if not aggregation_column:
+        aggregation_function = "COUNT"
+        aggregation_column = group_by_column
+        print(f"[AUTO_DETECT] No numeric column found, using COUNT({group_by_column})")
+    
+    # Build return values
+    group_by = [group_by_column]
+    projections = {
+        aggregation_column: f"{aggregation_function}({aggregation_column})"
+    }
+    
+    print(f"[AUTO_DETECT] ✅ Selected: group_by={group_by}, projections={projections}")
+    
+    return group_by, projections
+
 # ==================== UTILITY FUNCTIONS ====================
 
 def make_llm_request(prompt):
-    """Make a request to the LLM API"""
-    payload = {"model": MODEL, "messages": [{"role": "user", "content": prompt}]}
+    """Make a request to the OpenAI API"""
     try:
-        response = requests.post(URL, json=payload, headers=HEADERS)
-        result = response.json()
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        result = response.choices[0].message.content.strip()
         print(f"[LLM_RAW_RESPONSE] ==> {result}")
-        if "choices" in result and result["choices"]:
-            return result["choices"][0]["message"]["content"].strip()
-        return None
+        return result
     except Exception as e:
         print("❌ LLM request failed:", str(e))
         return None
@@ -938,6 +1038,41 @@ def handle_query_orm():
 
         # This was already here, it is not a debug line
         print("✅ Parsed JSON:", parsed_json)
+
+        # ==================== SMART CHART FALLBACK LOGIC ====================
+        # If user requested a chart but LLM didn't provide grouping, auto-detect it
+        if chart_type and (not group_by or not projections):
+            print("[SMART_CHART] ==> Chart requested but missing group_by/projections. Auto-detecting...")
+            
+            # Try to intelligently pick grouping and aggregation columns
+            auto_group_by, auto_projections = auto_detect_chart_columns(schema_info)
+            
+            if auto_group_by and auto_projections:
+                if not group_by:
+                    group_by = auto_group_by
+                    print(f"[SMART_CHART] ==> Auto-detected group_by: {group_by}")
+                
+                if not projections:
+                    projections = auto_projections
+                    print(f"[SMART_CHART] ==> Auto-detected projections: {projections}")
+                
+                # Set default sort to show highest values first
+                if not sort_config:
+                    proj_key = list(projections.keys())[0]
+                    sort_config = {"column": proj_key, "order": "desc"}
+                    print(f"[SMART_CHART] ==> Auto-set sorting: {sort_config}")
+                
+                # Set default limit for cleaner charts
+                if not limit_config:
+                    limit_config = 10
+                    print(f"[SMART_CHART] ==> Auto-set limit: {limit_config}")
+            else:
+                return jsonify({
+                    "error": "Cannot generate chart: Unable to auto-detect suitable columns for grouping and aggregation",
+                    "suggestion": "Please specify what data you want to visualize (e.g., 'show sales by category as a pie chart')",
+                    "table_name": table_name
+                }), 400
+        # ==================== END SMART CHART FALLBACK ====================
 
         # Handle chart type selection workflow
         if is_chart_request and not chart_type and group_by and projections:
