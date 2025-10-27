@@ -6,3 +6,7 @@ Requests==2.32.4
 SQLAlchemy==2.0.42
 gunicorn==21.2.0
 openai==1.51.0
+pandas
+streamlit
+pymysql
+flask-cors
